@@ -1,0 +1,107 @@
+name: git-secret setup and reveal
+description: A GitHub Action to setup git-secret and reveal secrets in a repository.
+
+branding:
+  icon: unlock
+  color: gray-dark
+
+inputs:
+  version:
+    required: false
+    description: git-secret version to use
+  private-key:
+    required: true
+    description: base64-encoded single-line gpg private key to decrypt secrets
+  passphrase:
+    required: true
+    description: gpg passphrase to decrypt secrets
+  github-com-pat:
+    required: false
+    description: GitHub.com PAT to retrieve latest git-secret version number from GitHub API (recommended for GitHub Enterprise environments)
+
+runs:
+  using: composite
+  steps:
+    - name: 🐧 Check for Linux
+      shell: bash
+      run: |
+        if ! [ "$RUNNER_OS" == "Linux" ]; then
+          echo "::error title=runner os is $RUNNER_OS::simbo/git-secret-action is only for linux runners"
+          exit 1
+        fi
+
+    - name: 🤝 Prepare GitHub API Auth
+      id: github-auth
+      shell: bash
+      run: |
+        if [[ "${{ inputs.github-com-pat }}" = "" ]]; then
+          pat=""
+        else
+          echo "::add-mask::${{ inputs.github-com-pat }}"
+          pat="${{ inputs.github-com-pat }}@"
+        fi
+        echo "::set-output name=pat::$pat"
+
+    - name: 🏷️ Determine git-secret Version
+      id: version
+      shell: bash
+      run: |
+        if [[ "${{ inputs.version }}" = "" ]]; then
+          randomString="$(dd if=/dev/urandom bs=16 count=1 status=none | base64 | tr -dc '[:alpha:]')"
+          versionJson="${RUNNER_TEMP}/git-secret-latest-version-${randomString}.json"
+          curl -sfL https://${{ steps.github-auth.outputs.pat }}api.github.com/repos/sobolevn/git-secret/releases/latest -o "${versionJson}" || true
+          if ! [[ -f "${versionJson}" ]]; then
+            echo "::error title=GitHub API Error::Could not retrieve the latest git-secret version info from GitHub API."
+            exit 1
+          fi
+          version="$(cat "${versionJson}" | grep '"tag_name":' | cut -d \" -f 4 | cut -d v -f 2)"
+          rm -f "${versionJson}"
+        else
+          version="${{ inputs.version }}"
+        fi
+        if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$ ]]; then
+          echo "::error title=Invalid Version::The git-secret version '${version}' is not a valid semver version."
+          exit 1
+        fi
+        echo "::set-output name=version::$version"
+
+    - name: 🛠 Setup git-secret
+      shell: bash
+      run: |
+        echo "::group::🛠 Setup git-secret v${{ steps.version.outputs.version }}"
+        sudo apt update
+        sudo apt install -y gpg gawk
+        randomString="$(dd if=/dev/urandom bs=16 count=1 status=none | base64 | tr -dc '[:alpha:]')"
+        tempDir="${RUNNER_TEMP}/git-secret-${randomString}"
+        mkdir "$tempDir"
+        curl -sfLo - "https://github.com/sobolevn/git-secret/archive/refs/tags/v${{ steps.version.outputs.version }}.tar.gz" | tar --strip-components=1 -C "${tempDir}" -xzf -
+        make -C "${tempDir}" build
+        sudo make -C "${tempDir}" install
+        rm -rf "${tempDir}"
+        echo "::endgroup::"
+
+    - name: ℹ️ git-secret Version Info
+      shell: bash
+      run: |
+        echo "::group::ℹ️ git-secret Version Info"
+        echo "--- GPG VERSION INFO ---"
+        gpg --version
+        echo "--- GIT-SECRET VERSION INFO ---"
+        git secret --version
+        echo "::endgroup::"
+
+    - name: 🔑 Add GPG Key
+      shell: bash
+      run: |
+        echo "::group::🔑 Add GPG Key"
+        echo "::add-mask::${{ inputs.private-key }}"
+        echo "${{ inputs.private-key }}" | base64 --decode | gpg --batch --yes --pinentry-mode loopback --import -
+        echo "::endgroup::"
+
+    - name: 🔓 Reveal Secrets
+      shell: bash
+      run: |
+        echo "::group::🔓 Reveal Secrets"
+        echo "::add-mask::$(printf "%s" "${{ inputs.passphrase }}")"
+        git secret reveal -v -p "$(printf "%s" "${{ inputs.passphrase }}")"
+        echo "::endgroup::"
