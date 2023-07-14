@@ -34,10 +34,10 @@ runs:
       id: github-auth
       shell: bash
       run: |
+        echo "::add-mask::${{ inputs.github-com-pat }}"
         if [[ "${{ inputs.github-com-pat }}" = "" ]]; then
           pat=""
         else
-          echo "::add-mask::${{ inputs.github-com-pat }}"
           pat="${{ inputs.github-com-pat }}@"
         fi
         echo "::set-output name=pat::$pat"
